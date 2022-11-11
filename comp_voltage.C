@@ -1,4 +1,23 @@
-void comp_voltage(bool calib=false){
+// if is_peaks_found = true, take the peak positions saved in the
+// txt file and fit for gain and ped, then calibrate spectrum
+// if is_peaks_found = false, fit peaks on the fly and fit for 
+// gain and ped, then calibrate spectrum
+bool is_peaks_found = true; 
+bool overwrite_peaks_file = false; // default to be false
+bool is_peaks_found_height = true; // default to be false
+bool overwrite_peaks_file_height = false; // default to be false
+
+//is_peaks_found = false;
+//is_peaks_found_height = false;
+
+void comp_voltage(const char* filelist=""){
+    
+    cout << " ======== is_peaks_found set to " << is_peaks_found << endl;
+    cout << " ======== overwrite_peaks_file set to " << overwrite_peaks_file << endl;
+
+    // load peak finding script
+    gROOT->ProcessLine(".L peak_finding.C");
+
 
     gStyle->SetOptStat(0);
 
@@ -12,23 +31,29 @@ void comp_voltage(bool calib=false){
     TH1F* h_ped_mean[20]; // pedestal rms 
     TH1F* h_sig_rms[20]; // signal rms 
     TH1F* h_sig_mean[20]; // signal mean 
+    TH1F* h_peak_pos[20]; // position of peak
+    TH1F* h_pulse_wid[20]; // width of pulse
 
     double gain_int[20];
+    double ped_int[20];
     double gain_height[20];
+    double ped_height[20];
 
     TLegend* lg = new TLegend(0.25, 0.50, 0.80, 0.90);
     lg->SetFillColor(0);
     lg->SetFillStyle(0);
     lg->SetBorderSize(0);
 
-    ifstream infile("list.txt");
+    const char* listname="list.txt";
+    if (filelist!="") listname = filelist;
+    ifstream infile(listname); // file list
     TString name;
     int npt = 0;    
 
     TCanvas* c1 = new TCanvas();
     TCanvas* c2 = new TCanvas();
     TCanvas* c3 = new TCanvas();
-    c3->Divide(2,2);
+    c3->Divide(3,2);
     //TCanvas* c8 = new TCanvas();
     TCanvas* c4 = new TCanvas();
     TCanvas* c5 = new TCanvas();
@@ -56,6 +81,8 @@ void comp_voltage(bool calib=false){
         int pos = name.Last('/');
         TString datedir = name(0, pos);
 
+        TString BV = decode_bias_from_name(name);
+
         if(last_datedir!="" && datedir!=last_datedir){
             fclose(pfile_int);
             fclose(pfile_height);
@@ -82,36 +109,85 @@ void comp_voltage(bool calib=false){
 
         // temp canvas to form hist
         const char* histname;
-        //TCut cut = "ped_mean<0.01";
+        //TCut cut = "sig_rms<1.8";
+        //TCut cut = "peak_pos>238";
+        //TCut cut = "peak_pos>190 && peak_pos<250";
+        //TCut cut = "(min_pos-peak_pos)>10 && (min_pos-peak_pos)<35&&Entry$<100000";
         TCut cut = "";
+        cout << "******* CUT used: " << cut.GetTitle() << endl;
         // plot figures
-        h_int[npt] = create_hist(wf_info,   "charge", "h_int",      npt, 440, -1, 10, "Integral (A.U.)", cut);
+        //h_int[npt] = create_hist(wf_info,   "charge_near_peak_local", "h_int",      npt, 4200, -1, 25, "Integral (A.U.)", cut, "", -0.1, 5);
+        h_int[npt] = create_hist(wf_info,   "charge", "h_int",      npt, 4200, -1, 25, "Integral (A.U.)", cut);
         
-        h_height[npt] = create_hist(wf_info,"height", "h_height",   npt, 4440, -0.1, 10, "Pulse height [V]", cut);
+        //h_height[npt] = create_hist(wf_info, "height_local", "h_height",   npt, 4200, -0.1, 0.5, "Pulse height [V]", cut, "", 0.0, 1);
+        //h_height[npt] = create_hist(wf_info, "height_local", "h_height",   npt, 4200, -0.1, 0.5, "Pulse height [V]", cut, "");
+        h_height[npt] = create_hist(wf_info, "height", "h_height",   npt, 4200, -0.1, 0.5, "Pulse height [V]", cut, "");
         
         h_ped_rms[npt] = create_hist(wf_info,"ped_rms", "h_ped_rms", npt, 1000, 0, 0.02, "Baseline RMS [V]");
 
-        h_ped_mean[npt] = create_hist(wf_info,"ped_mean", "h_ped_mean", npt, 1000, -0.01, 0.05, "Baseline mean [V]");
+        h_ped_mean[npt] = create_hist(wf_info,"ped", "h_ped_mean", npt, 1000, -0.01, 0.05, "Baseline mean [V]");
 
         h_sig_rms[npt] = create_hist(wf_info,"sig_rms", "h_sig_rms", npt, 1000, 0, 0.02, "Signal RMS [V]");
 
         h_sig_mean[npt] = create_hist(wf_info,"sig_mean", "h_sig_mean", npt, 1000, -0.01, 0.05, "Signal mean [V]");
+
+        h_peak_pos[npt] = create_hist(wf_info,"peak_pos", "h_peak_pos", npt, 1024, 0, 1024, "Peak position");
+
+        h_pulse_wid[npt] = create_hist(wf_info,"(min_pos-peak_pos)", "h_pulse_wid", npt, 2048, -1024, 1024, "pulse width");
 
         double res[2];
         c1->cd();
         if(npt==0) h_int[npt]->Draw("hist");
         else h_int[npt]->Draw("histsame");
         lg->AddEntry(h_int[npt], name.Data(), "l");
-        fit_single_gaus(h_int[npt], res);
-        fprintf(pfile_int, "%f %f\n", res[0], res[1]);
-        gain_int[npt] = res[0];
+        // calibration using fit with single gaus
+        //fit_single_gaus(h_int[npt], res);
+        //fprintf(pfile_int, "%f %f\n", res[0], res[1]);
+        //gain_int[npt] = res[0];
+
+        // calibration with peak finding using multiple peaks
+        const char* peak_int_filename = Form("root/%s/peak_pos_int.txt", name.Data());
+        if(!is_peaks_found){
+            if(!gSystem->AccessPathName(peak_int_filename)){
+                // file already existed
+                if(!overwrite_peaks_file){
+                    cout << peak_int_filename << " already existed, exit ..." << endl;
+                    cout << "SET overwrite_peaks_file = true to ignore." << endl;
+                    cout << "If you do want to find peaks again, SET overwrite_peaks_file = true to ignore." << endl;
+                    cout << "Otherwise SET is_found_peaks = true" << endl;
+                    return;
+                }
+            }
+            get_peaks(h_int[npt], peak_int_filename);
+        }
+        // read peak pos from peak_int_filename and fit gain
+        get_gain_calib(peak_int_filename, gain_int[npt], ped_int[npt]);
+        fprintf(pfile_int, "%s %f %f\n", BV.Data(), gain_int[npt], ped_int[npt]);
         
         c2->cd();
         if(npt==0) h_height[npt]->Draw("hist");
         else h_height[npt]->Draw("histsame");
-        fit_single_gaus(h_height[npt], res);
+        cout << "Mean " << h_height[npt]->GetMean() << endl;
+        //fit_single_gaus(h_height[npt], res);
         //fprintf(pfile_height, "%f %f\n", res[0], res[1]);
         //gain_height[npt] = res[0];
+
+        // calibration with peak finding using multiple peaks
+        const char* peak_height_filename = Form("root/%s/peak_pos_height.txt", name.Data());
+        if(!is_peaks_found_height){
+            if(!gSystem->AccessPathName(peak_height_filename)){
+                // file already existed
+                if(!overwrite_peaks_file_height){
+                    cout << peak_height_filename << " already existed, exit ..." << endl;
+                    cout << "If you do want to find peaks again, SET overwrite_peaks_file = true to ignore." << endl;
+                    cout << "Otherwise SET is_found_peaks = true" << endl;
+                    return;
+                }
+            }
+            get_peaks(h_height[npt], peak_height_filename);
+        }
+        get_gain_calib(peak_height_filename, gain_height[npt], ped_height[npt]);
+        fprintf(pfile_height, "%s %f %f\n", BV.Data(), gain_height[npt], ped_height[npt]);
 
         c3->cd();
         c3->cd(1);
@@ -130,26 +206,37 @@ void comp_voltage(bool calib=false){
         if(npt==0) h_sig_mean[npt]->Draw("hist");
         else h_sig_mean[npt]->Draw("histsame");
 
+        c3->cd(5);
+        if(npt==0) h_peak_pos[npt]->Draw("hist");
+        else h_peak_pos[npt]->Draw("histsame");
+
+        c3->cd(6);
+        if(npt==0) h_pulse_wid[npt]->Draw("hist");
+        else h_pulse_wid[npt]->Draw("histsame");
+
         // draw calibrated spectrum
-        h_int_calib[npt] = create_hist(wf_info, Form("charge/%f", gain_int[npt]), "h_int_calib", npt, 1500, 0, 15, "Integral Charge (PE)", cut);
+        h_int_calib[npt] = create_hist(wf_info, Form("(charge-%f)/%f", ped_int[npt], gain_int[npt]), "h_int_calib", npt, 1500, 0, 15, "Integral Charge (PE)", cut, BV.Data());
         c4->cd();
         if(npt==0) h_int_calib[npt]->Draw("hist");
         else h_int_calib[npt]->Draw("histsame");
 
-        h_height_calib[npt] = create_hist(wf_info, Form("height/%f", gain_height[npt]), "h_height_calib", npt, 300, 0, 15, "Height Charge (PE)", cut);
+        h_height_calib[npt] = create_hist(wf_info, Form("(height-%f)/%f", ped_height[npt], gain_height[npt]), "h_height_calib", npt, 300, 0, 15, "Height Charge (PE)", cut, BV.Data());
+        //h_height_calib[npt] = create_hist(wf_info, Form("(height)/0.02", ped_height[npt], gain_height[npt]), "h_height_calib", npt, 300, 0, 15, "Height Charge (PE)", cut, BV.Data());
         c5->cd();
         if(npt==0) h_height_calib[npt]->Draw("hist");
         else h_height_calib[npt]->Draw("histsame");
 
-        h_int_calib_fr[npt] = create_hist(wf_info, Form("charge/%f", gain_int[npt]), "h_int_calib_fr", npt, 640, 0, 160, "Integral Charge (PE)", cut);
+        h_int_calib_fr[npt] = create_hist(wf_info, Form("(charge-%f)/%f", ped_int[npt], gain_int[npt]), "h_int_calib_fr", npt, 640, 0, 160, "Integral Charge (PE)", cut, BV.Data());
         c6->cd();
         if(npt==0) h_int_calib_fr[npt]->Draw("hist");
         else h_int_calib_fr[npt]->Draw("histsame");
 
-        h_height_calib_fr[npt] = create_hist(wf_info, Form("height/%f", gain_height[npt]), "h_height_calib_fr", npt, 320, 0, 160, "Height Charge (PE)", cut);
+        h_height_calib_fr[npt] = create_hist(wf_info, Form("(height-%f)/%f", ped_height[npt], gain_height[npt]), "h_height_calib_fr", npt, 320, 0, 160, "Height Charge (PE)", cut, BV.Data());
+        //h_height_calib_fr[npt] = create_hist(wf_info, Form("(height)/0.02", ped_height[npt], gain_height[npt]), "h_height_calib_fr", npt, 320, 0, 160, "Height Charge (PE)", cut, BV.Data());
         c7->cd();
         if(npt==0) h_height_calib_fr[npt]->Draw("hist");
         else h_height_calib_fr[npt]->Draw("histsame");
+
 
         npt++; // total number of points
 
@@ -158,9 +245,11 @@ void comp_voltage(bool calib=false){
 
     c1->cd();
     lg->Draw();
+    gPad->SetLogy();
 
     c2->cd();
     lg->Draw();
+    gPad->SetLogy();
 
     for(int i=0;i<4;i++){
         c3->cd(i+1);
@@ -205,10 +294,32 @@ void comp_voltage(bool calib=false){
     // save output hist
     TFile* outfile = new TFile(Form("root/%s/spectrum.root", datedir.Data()), "recreate");
     for(int i=0;i<npt;i++){
+        //h_int[i]->Write();
+        //h_height[i]->Write();
         h_int_calib[i]->Write();
         h_int_calib_fr[i]->Write();
+        h_height_calib[i]->Write();
+        h_height_calib_fr[i]->Write();
     }
     outfile->Close();
+
+}
+
+TString decode_bias_from_name(TString filename){
+    
+    TObjArray* objArray = filename.Tokenize("_");
+    int n = objArray->GetEntries();
+    for(int i=0;i<n;i++){
+        TObjString* objstr = (TObjString*)objArray->At(i);
+        TString str = objstr->GetString();
+        if(str.EndsWith("V")){
+            int pos = str.Last('V');
+            TString vol = str(0, pos);
+            cout << "Bias voltage: " << vol << endl;
+            return vol;
+        }
+    }
+
 
 }
 
@@ -220,14 +331,26 @@ TH1F* create_hist(TTree* tree,
                   double x_low,
                   double x_high,
                   const char* xtitle,
-                  const char* cut=""){
+                  const char* cut="",
+                  const char* title="",
+                  double norm_range=-1e9,
+                  double norm_range_end=-1e9){
 
     gROOT->SetBatch(true);
     TCanvas* c = new TCanvas();
     const char* histname_full = Form("%s_%d", histname, npt);
     TH1F* h = new TH1F(histname_full, cut, nbins, x_low, x_high);
-    tree->Draw(Form("%s>>%s", branchname, histname_full), cut);
+    tree->Draw(Form("%s>>%s", branchname, histname_full), cut, "");
+    h->SetTitle(title);
     format_hist(h, npt, xtitle);
+    if(norm_range>-1e9){
+        int start_bin = h->FindBin(norm_range);
+        int end_bin = nbins+1;
+        if(norm_range_end>-1e9) end_bin = h->FindBin(norm_range_end);
+        cout << start_bin << " " << end_bin << " " << h->Integral(start_bin, end_bin) << endl;
+        //cout << "Scale " << 1./h->Integral(start_bin, end_bin) << endl;
+        h->Scale(1./h->Integral(start_bin, end_bin));
+    }
     c->Close();
     gROOT->SetBatch(false);
     return h;
@@ -238,7 +361,9 @@ void format_hist(TH1F* h, int npt, const char* xtitle){
 
     h->Sumw2();
     //h->Scale(1./h->GetEntries());
-    h->SetLineColor(npt+1);
+    int color = npt+1;
+    if (color>=5) color+=1; // skip yellow
+    h->SetLineColor(color);
     h->SetLineWidth(1);
     h->GetXaxis()->SetTitle(xtitle);
 
